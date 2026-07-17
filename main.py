@@ -1,37 +1,58 @@
-import httpx
-from pathlib import Path
+import logging
+from contextlib import asynccontextmanager
 
-MINERU_API_URL = "http://127.0.0.1:8010"
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.chat import router as chat_router
+from app.api.feedback import router as feedback_router
+from app.core import mineru
+from app.core.config import settings
+
+logger = logging.getLogger("document_agent")
 
 
-def parse_document(
-    file_path: str,
-    lang: str = "cyrillic",
-    backend: str = "pipeline",
-) -> str:
-    path = Path(file_path)
-    with open(path, "rb") as f:
-        files = {"files": (path.name, f, "application/octet-stream")}
-        data = {
-            "backend": backend,
-            "lang_list": lang,
-            "parse_method": "auto",
-            "formula_enable": "true",
-            "table_enable": "true",
-            "return_md": "true",
-        }
-        resp = httpx.post(
-            f"{MINERU_API_URL}/file_parse",
-            files=files,
-            data=data,
-            timeout=600,
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # схему ведёт Alembic: alembic upgrade head перед стартом
+    if not await mineru.is_available():
+        logger.warning(
+            "MinerU недоступен по %s на старте — сервис поднимется, но "
+            "обработка документов будет падать (502), пока MinerU не появится.",
+            settings.MINERU_API_URL,
         )
-    resp.raise_for_status()
-    payload = resp.json()
-    # ключ результата — имя файла без расширения
-    return payload["results"][path.stem]["md_content"]
+    yield
+
+
+app = FastAPI(
+    title="Document OCR+LLM Agent API",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+app.include_router(chat_router, tags=["chat"])
+app.include_router(feedback_router, tags=["feedback"])
 
 
 if __name__ == "__main__":
-    md = parse_document("utochnenie_parametrov_modeli_razrusheniya_splava_amg6_pri_vysokoskorostnom.pdf")
-    print(md[:3000])
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8006,
+        reload=True,
+        timeout_keep_alive=300,
+    )
