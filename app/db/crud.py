@@ -12,7 +12,7 @@ from app.models.models import ChatSession, ChatMessage, MessageFeedback, Documen
 async def create_session(db: AsyncSession, user_id, title: Optional[str] = None) -> ChatSession:
     s = ChatSession(user_id=user_id, title=title)
     db.add(s)
-    
+
     await db.commit()
     await db.refresh(s)
 
@@ -80,6 +80,7 @@ async def add_message(
         sources=sources,
     )
     db.add(msg)
+
     await db.commit()
     await db.refresh(msg)
     await _touch(db, session_id)
@@ -197,6 +198,22 @@ async def get_document(db: AsyncSession, document_id: UUID) -> Optional[Document
 
 async def get_document_by_message(db: AsyncSession, message_id: UUID) -> Optional[Document]:
     result = await db.execute(select(Document).where(Document.message_id == message_id))
+    return result.scalar_one_or_none()
+
+
+async def get_latest_document(db: AsyncSession, session_id: UUID) -> Optional[Document]:
+    """
+    Последний УСПЕШНО обработанный документ сессии — используется, когда
+    пользователь задаёт следующий вопрос без нового вложения: контекст
+    документа считается действующим до тех пор, пока не пришёл новый файл.
+    """
+    result = await db.execute(
+        select(Document)
+        .where(Document.session_id == session_id, Document.status == "done")
+        .order_by(Document.created_at.desc())
+        .limit(1)
+    )
+
     return result.scalar_one_or_none()
 
 
