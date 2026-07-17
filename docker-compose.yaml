@@ -11,5 +11,14 @@ services:
     ports:
       - "5436:5432"
 
+  mineru:
+    build:
+      context: ./mineru
+      args:
+        MINERU_MODEL_SOURCE: huggingface
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+
 volumes:
   postgres_data:
