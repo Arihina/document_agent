@@ -8,6 +8,14 @@ class Settings(BaseSettings):
     DB_PASSWORD: str
     DB_NAME: str
 
+    OLLAMA_HOST: str
+    OLLAMA_MODEL: str
+
+    MINERU_API_URL: str
+    MINERU_BACKEND: str = "pipeline"
+    MINERU_LANG: str = "cyrillic"
+    MINERU_TIMEOUT_SECONDS: int = 600
+
     @property
     def db_url(self) -> str:
         return (
