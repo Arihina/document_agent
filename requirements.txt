@@ -43,7 +43,6 @@ docstring_parser==0.18.0
 einops==0.8.2
 email-validator==2.3.0
 et_xmlfile==2.0.0
-fast-langdetect==0.2.5
 fastapi==0.139.2
 fastapi-cli==0.0.32
 fastapi-cloud-cli==0.22.2
