@@ -96,8 +96,6 @@ markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mcp==1.28.1
 mdurl==0.1.2
-mineru==3.4.4
-mineru_vl_utils==1.0.5
 mistral_common==1.11.6
 ml_dtypes==0.5.4
 model-hosting-container-standards==0.1.16
