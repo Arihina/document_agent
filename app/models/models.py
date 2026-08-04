@@ -14,8 +14,8 @@ class Base(DeclarativeBase):
     pass
 
 
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
+class Conversation(Base):
+    __tablename__ = "conversations"
 
     id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid4,
@@ -34,7 +34,7 @@ class ChatSession(Base):
     )
 
     messages: Mapped[list["ChatMessage"]] = relationship(
-        back_populates="session",
+        back_populates="conversation",
         cascade="all, delete-orphan",
         order_by="ChatMessage.created_at",
         lazy="selectin",
@@ -47,25 +47,28 @@ class ChatMessage(Base):
     id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid4,
     )
-    session_id: Mapped[PyUUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+    user_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True,
+    )
+    conversation_id: Mapped[Optional[PyUUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=True, index=True,
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sources: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    session: Mapped["ChatSession"] = relationship(back_populates="messages")
+    conversation: Mapped[Optional["Conversation"]] = relationship(
+        back_populates="messages")
     feedback: Mapped[Optional["MessageFeedback"]] = relationship(
-        back_populates="message",
-        uselist=False,
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-    document: Mapped[Optional["Document"]] = relationship(
         back_populates="message",
         uselist=False,
         cascade="all, delete-orphan",
@@ -102,35 +105,17 @@ class MessageFeedback(Base):
     )
 
 
-class Document(Base):
-    """
-    Загруженный пользователем файл + результат его разбора MinerU.
-    Само содержимое файла хранится в БД (BYTEA).
-
-    session_id денормализован относительно message_id (источник истины —
-    message_id) — добавлен ради дешёвых запросов "все документы сессии"
-    без join через chat_messages.
-
-    Удаление сессии/сообщения удаляет документ (и его содержимое) сразу
-    двумя независимыми путями: ORM cascade="all, delete-orphan" на
-    ChatMessage.document + ON DELETE CASCADE на обоих FK на уровне БД —
-    второе подстраховывает на случай удаления в обход ORM.
-    """
-    __tablename__ = "documents"
+class File(Base):
+    __tablename__ = "files"
 
     id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid4,
     )
-    session_id: Mapped[PyUUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"),
-        nullable=False, index=True,
-    )
-    message_id: Mapped[PyUUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chat_messages.id", ondelete="CASCADE"),
-        nullable=False, unique=True, index=True,
+    user_id: Mapped[PyUUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True,
     )
 
-    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_type: Mapped[Optional[str]] = mapped_column(
         String(127), nullable=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -158,9 +143,6 @@ class Document(Base):
     __table_args__ = (
         CheckConstraint(
             "status IN ('pending', 'processing', 'done', 'failed')",
-            name="ck_document_status",
+            name="ck_file_status",
         ),
     )
-
-    session: Mapped["ChatSession"] = relationship()
-    message: Mapped["ChatMessage"] = relationship(back_populates="document")
