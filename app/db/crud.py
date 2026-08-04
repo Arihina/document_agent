@@ -1,101 +1,110 @@
 from datetime import datetime, timezone
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
-from app.models.models import ChatSession, ChatMessage, MessageFeedback, Document
+from app.models.models import Conversation, ChatMessage, MessageFeedback, File
 
 
-async def create_session(db: AsyncSession, user_id, title: Optional[str] = None) -> ChatSession:
-    s = ChatSession(user_id=user_id, title=title)
-    db.add(s)
-
+async def create_conversation(db: AsyncSession, user_id, title: Optional[str] = None) -> Conversation:
+    c = Conversation(user_id=user_id, title=title)
+    db.add(c)
+    
     await db.commit()
-    await db.refresh(s)
+    await db.refresh(c)
 
-    return s
+    return c
 
 
-async def get_session(db: AsyncSession, session_id: UUID, user_id) -> Optional[ChatSession]:
+async def get_conversation(db: AsyncSession, conversation_id: UUID, user_id) -> Optional[Conversation]:
     result = await db.execute(
-        select(ChatSession).where(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id,
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
         )
     )
 
     return result.scalar_one_or_none()
 
 
-async def list_sessions(db: AsyncSession, user_id) -> list[ChatSession]:
+async def list_conversations(db: AsyncSession, user_id) -> list[Conversation]:
     result = await db.execute(
-        select(ChatSession)
-        .where(ChatSession.user_id == user_id)
-        .order_by(ChatSession.updated_at.desc())
+        select(Conversation)
+        .where(Conversation.user_id == user_id)
+        .order_by(Conversation.updated_at.desc())
     )
 
     return result.scalars().all()
 
 
-async def rename_session(db: AsyncSession, s: ChatSession, title: str) -> ChatSession:
-    s.title = title
+async def rename_conversation(db: AsyncSession, c: Conversation, title: str) -> Conversation:
+    c.title = title
+
     await db.commit()
-    await db.refresh(s)
-    return s
+    await db.refresh(c)
+
+    return c
 
 
-async def delete_session(db: AsyncSession, s: ChatSession) -> None:
-    await db.delete(s)
-    await db.commit()
-
-
-async def delete_all_sessions(db: AsyncSession) -> None:
-    await db.execute(delete(ChatSession))
+async def delete_conversation(db: AsyncSession, c: Conversation) -> None:
+    await db.delete(c)
     await db.commit()
 
 
-async def _touch(db: AsyncSession, session_id: UUID) -> None:
-    await db.execute(
-        update(ChatSession)
-        .where(ChatSession.id == session_id)
-        .values(updated_at=datetime.now(timezone.utc))
+async def get_conversation_messages(db: AsyncSession, conversation_id: UUID) -> list[ChatMessage]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .order_by(ChatMessage.created_at)
     )
+
+    return result.scalars().all()
+
+
+async def touch_conversation(db: AsyncSession, conversation_id: UUID, title: Optional[str] = None) -> None:
+    c = await db.get(Conversation, conversation_id)
+    if c is None:
+        return
+    
+    c.updated_at = datetime.now(timezone.utc)
+    if title is not None and c.title is None:
+        c.title = title
+
     await db.commit()
 
 
 async def add_message(
     db: AsyncSession,
-    session_id: UUID,
+    user_id,
     role: str,
     content: str,
     sources: Optional[list] = None,
+    model: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    id: Optional[UUID] = None,
+    conversation_id: Optional[UUID] = None,
 ) -> ChatMessage:
     msg = ChatMessage(
-        session_id=session_id,
+        id=id or uuid4(),
+        user_id=user_id,
+        conversation_id=conversation_id,
         role=role,
         content=content,
         sources=sources,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
     db.add(msg)
 
     await db.commit()
     await db.refresh(msg)
-    await _touch(db, session_id)
 
     return msg
-
-
-async def get_messages(db: AsyncSession, session_id: UUID) -> list[ChatMessage]:
-    result = await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at)
-    )
-
-    return result.scalars().all()
 
 
 async def get_message(db: AsyncSession, message_id: UUID) -> Optional[ChatMessage]:
@@ -105,20 +114,13 @@ async def get_message(db: AsyncSession, message_id: UUID) -> Optional[ChatMessag
 
 async def get_message_for_user(db: AsyncSession, message_id: UUID, user_id) -> Optional[ChatMessage]:
     result = await db.execute(
-        select(ChatMessage)
-        .join(ChatSession, ChatMessage.session_id == ChatSession.id)
-        .where(
+        select(ChatMessage).where(
             ChatMessage.id == message_id,
-            ChatSession.user_id == user_id,
+            ChatMessage.user_id == user_id,
         )
     )
 
     return result.scalar_one_or_none()
-
-
-async def build_history(db: AsyncSession, session_id: UUID) -> list[tuple[str, str]]:
-    messages = await get_messages(db, session_id)
-    return [(m.role, m.content) for m in messages]
 
 
 async def upsert_feedback(
@@ -161,101 +163,96 @@ async def get_feedback(db: AsyncSession, message_id: UUID) -> Optional[MessageFe
     result = await db.execute(
         select(MessageFeedback).where(MessageFeedback.message_id == message_id)
     )
+
     return result.scalar_one_or_none()
 
 
-async def create_document(
+async def create_file(
     db: AsyncSession,
-    session_id: UUID,
-    message_id: UUID,
-    original_filename: str,
+    user_id,
+    filename: str,
     mime_type: Optional[str],
     size_bytes: int,
     content: bytes,
-) -> Document:
-    doc = Document(
-        session_id=session_id,
-        message_id=message_id,
-        original_filename=original_filename,
+) -> File:
+    f = File(
+        user_id=user_id,
+        filename=filename,
         mime_type=mime_type,
         size_bytes=size_bytes,
         content=content,
         status="pending",
     )
-    db.add(doc)
+    db.add(f)
 
     await db.commit()
-    await db.refresh(doc)
+    await db.refresh(f)
 
-    return doc
+    return f
 
 
-async def get_document(db: AsyncSession, document_id: UUID) -> Optional[Document]:
-    """Метаданные + статус, без блоба файла (content отложен)."""
-    result = await db.execute(select(Document).where(Document.id == document_id))
+async def get_file(db: AsyncSession, file_id: UUID) -> Optional[File]:
+    result = await db.execute(select(File).where(File.id == file_id))
     return result.scalar_one_or_none()
 
 
-async def get_document_by_message(db: AsyncSession, message_id: UUID) -> Optional[Document]:
-    result = await db.execute(select(Document).where(Document.message_id == message_id))
-    return result.scalar_one_or_none()
-
-
-async def get_latest_document(db: AsyncSession, session_id: UUID) -> Optional[Document]:
-    """
-    Последний УСПЕШНО обработанный документ сессии — используется, когда
-    пользователь задаёт следующий вопрос без нового вложения: контекст
-    документа считается действующим до тех пор, пока не пришёл новый файл.
-    """
+async def get_file_for_user(db: AsyncSession, file_id: UUID, user_id) -> Optional[File]:
     result = await db.execute(
-        select(Document)
-        .where(Document.session_id == session_id, Document.status == "done")
-        .order_by(Document.created_at.desc())
-        .limit(1)
+        select(File).where(File.id == file_id, File.user_id == user_id)
     )
 
     return result.scalar_one_or_none()
 
 
-async def get_document_content(db: AsyncSession, document_id: UUID) -> Optional[Document]:
-    """То же самое, но с явной догрузкой content — для передачи в MinerU."""
+async def get_file_content(db: AsyncSession, file_id: UUID) -> Optional[File]:
     result = await db.execute(
-        select(Document)
-        .options(undefer(Document.content))
-        .where(Document.id == document_id)
+        select(File).options(undefer(File.content)).where(File.id == file_id)
     )
 
     return result.scalar_one_or_none()
 
 
-async def set_document_processing(db: AsyncSession, document: Document) -> Document:
-    document.status = "processing"
+async def list_files(db: AsyncSession, user_id) -> list[File]:
+    result = await db.execute(
+        select(File)
+        .where(File.user_id == user_id)
+        .order_by(File.created_at.desc())
+    )
+
+    return result.scalars().all()
+
+
+async def delete_file(db: AsyncSession, f: File) -> None:
+    await db.delete(f)
     await db.commit()
-    await db.refresh(document)
-
-    return document
 
 
-async def set_document_done(
-    db: AsyncSession,
-    document: Document,
-    markdown_content: str,
-    ocr_backend: str,
-) -> Document:
-    document.status = "done"
-    document.markdown_content = markdown_content
-    document.ocr_backend = ocr_backend
-    document.error_message = None
+async def set_file_processing(db: AsyncSession, f: File) -> File:
+    f.status = "processing"
+
     await db.commit()
-    await db.refresh(document)
+    await db.refresh(f)
 
-    return document
+    return f
 
 
-async def set_document_failed(db: AsyncSession, document: Document, error_message: str) -> Document:
-    document.status = "failed"
-    document.error_message = error_message
+async def set_file_done(db: AsyncSession, f: File, markdown_content: str, ocr_backend: str) -> File:
+    f.status = "done"
+    f.markdown_content = markdown_content
+    f.ocr_backend = ocr_backend
+    f.error_message = None
+
     await db.commit()
-    await db.refresh(document)
+    await db.refresh(f)
 
-    return document
+    return f
+
+
+async def set_file_failed(db: AsyncSession, f: File, error_message: str) -> File:
+    f.status = "failed"
+    f.error_message = error_message
+
+    await db.commit()
+    await db.refresh(f)
+
+    return f
