@@ -63,7 +63,7 @@ def stream_answer(
     question: str,
     document_markdown: str | None,
     history: list[tuple[str, str]],
-) -> Generator[str, None, None]:
+) -> Generator[tuple[str, dict | None], None, None]:
     if document_markdown:
         prompt = _document_prompt(document_markdown, history, question)
     else:
@@ -74,6 +74,19 @@ def stream_answer(
         messages=[{"role": "user", "content": prompt}],
         stream=True,
     )
+    prompt_tokens = 0
+    completion_tokens = 0
     for chunk in stream:
         token: str = chunk["message"]["content"]
-        yield token
+        if token:
+            yield token, None
+        if chunk.get("done"):
+            prompt_tokens = chunk.get("prompt_eval_count", 0) or 0
+            completion_tokens = chunk.get("eval_count", 0) or 0
+
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    yield "", usage
