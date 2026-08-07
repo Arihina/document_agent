@@ -114,6 +114,11 @@ class File(Base):
     user_id: Mapped[PyUUID] = mapped_column(
         UUID(as_uuid=True), nullable=False, index=True,
     )
+    conversation_id: Mapped[Optional[PyUUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey(
+            "conversations.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
 
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_type: Mapped[Optional[str]] = mapped_column(
