@@ -2,15 +2,16 @@
 
 Агент платформы: пользователь загружает документ (PDF/DOCX/изображение)
 через отдельную ручку, MinerU разбирает его в markdown, дальше документ
-можно подключать к любому количеству вопросов явной ссылкой на его `id` —
-без диалоговой памяти о «последнем загруженном файле». Плюс полноценный
+можно подключать к вопросам либо явной ссылкой на его `id`, либо (в форме
+Responses, если файл был загружен в чат) автоматически. Плюс полноценный
 диалог: чаты, история, продолжение разговора.
 
-API совместим с OpenAI Chat Completions (`/v1/chat/completions`) и OpenAI
-Files API (`/v1/files`).
+Отдаёт генерацию в **двух** формах OpenAI API одновременно — Chat
+Completions (`/v1/chat/completions`) и Responses (`/v1/responses`) — плюс
+OpenAI Files API (`/v1/files`).
 
 Реализует канонический контракт `master_node`: `transport="contract"`,
-`capabilities={"chat", "documents"}`, `routable=True`.
+`capabilities={"chat", "attachments"}`, `routable=True`.
 
 ## Подготовка перед запуском
 
@@ -71,7 +72,7 @@ JWT валидирует мастер-агент; агент доверяет в
 |----------|-----|
 | Заголовок `X-User-Id` отсутствует | `401` |
 | `X-User-Id` не является валидным UUID | `401` |
-| Обращение к чужому completion'у, чату (`conversation`) или файлу | `404` |
+| Обращение к чужому completion'у/response'у, чату (`conversation`) или файлу | `404` |
 | Файл больше 25 МБ | `413` |
 | Файл ещё не обработан (`status != "done"`), а на него сослались в чате | `422` |
 
@@ -80,33 +81,52 @@ JWT валидирует мастер-агент; агент доверяет в
 
 ## API — общая идея
 
-Три независимые части:
+Четыре независимые части:
 
-- **`/v1/chat/completions`** — OpenAI-совместимый эндпоинт генерации.
-  **Полностью stateless**: клиент присылает всю историю в `messages[]` при
-  каждом запросе, сервер её не хранит и не переиспользует между вызовами.
+- **`/v1/chat/completions`** — форма Chat Completions. **Полностью
+  stateless**: клиент присылает всю историю в `messages[]` при каждом
+  запросе. Путь для быстрой интеграции сторонних клиентов/вендоров и для
+  отладки.
+- **`/v1/responses`** — форма Responses API. Тоже полностью рабочая сама
+  по себе (весь `input` от клиента) — но при переданном `conversation_id`
+  **сервис сам собирает текстовую историю из БД**, клиенту нужно прислать
+  только новый ход. Это путь, которым пользуется собственный фронт
+  платформы. Подробности — в разделе `POST /v1/responses` ниже.
 - **`/v1/files`** — OpenAI Files API. Загрузка документа отдельным вызовом
-  (MinerU-разбор происходит здесь, синхронно), дальше файл — независимый,
-  переиспользуемый ресурс: подключается к любому вопросу явной ссылкой на
-  `id`, а не автоматически «текущим документом чата».
-- **`/v1/platform/conversations`** — платформенное (не входящее в
-  OpenAI-стандарт) расширение для UI: список чатов, история, переименование,
-  удаление. Не участвует в генерации и не хранит контекст для модели — это
-  только группировка сообщений для отображения.
+  (MinerU-разбор происходит здесь, синхронно). Файл — независимый,
+  переиспользуемый ресурс, подключается к вопросу явной ссылкой на `id` —
+  это работает всегда, в обеих формах. Дополнительно, если при загрузке
+  указан `conversation_id`, файл привязывается к чату и в форме Responses
+  может подключаться автоматически (см. ниже). **Общий ресурс для обеих
+  форм генерации.**
+- **`/v1/platform/conversations`** — платформенное (не входящее ни в одну
+  спеку OpenAI) расширение для UI: список чатов, история, переименование,
+  удаление. Обе формы генерации читают/пишут в одни и те же
+  `conversations`/`chat_messages`.
 
-**Документ не «помнится» между ходами диалога сам по себе.** Раньше файл,
-приложенный к одному сообщению, автоматически оставался «активным
-документом» для всех следующих вопросов в той же сессии, пока не пришёл
-новый файл. Сейчас такой магии нет: документ входит в контекст конкретного
-вызова `/v1/chat/completions` **только** если клиент явно сослался на его
-`file_id` в `content` текущего сообщения — на следующем ходу, если документ
-всё ещё нужен, ссылку нужно передать снова. Это не ограничение реализации,
-а то же самое поведение, что и у мультимодального контента в настоящем
-OpenAI API: файл/изображение из истории не «помнится» моделью между
-вызовами, его нужно включать в `messages[]` каждый раз, когда он должен
-быть в контексте — сам LLM-вызов ничего не хранит между запросами. Именно
-поэтому `conversation_id` — просто ярлык для группировки чата в UI и не
-участвует в сборке контекста ни при каких условиях.
+Фидбэк (`/v1/chat/completions/{id}/feedback`) — **общий для обеих форм
+генерации**, не дублируется под `/v1/responses/...`.
+
+**Подключение документа зависит от формы:**
+
+- **Chat Completions** — документ входит в контекст **только** если клиент
+  явно сослался на его `id` в `content` текущего сообщения. Никакой памяти
+  о прошлых ходах и никакой автоматики — ни при каких условиях. Это то же
+  самое поведение, что и у мультимодального контента в настоящем OpenAI
+  API: файл/изображение из истории не «помнится» моделью между вызовами.
+- **Responses** — то же самое явное поведение, **плюс** автоматика для
+  файлов, загруженных с `conversation_id`: если в текущем `input` нет явной
+  ссылки на файл, а чат есть, агент сам подставляет последний обработанный
+  (`status: "done"`) файл, загруженный именно в этот чат (см. `POST /v1/files`
+  и `POST /v1/responses` ниже). Явная ссылка в текущем ходу, если она есть,
+  всегда важнее автоматики — переопределить можно в любой момент, указав
+  другой `file_id`.
+
+Текстовая история (через `conversation_id`) и подключение файла — по-прежнему
+два независимых механизма: `conversation_id` в форме Responses подтягивает
+текст прошлых сообщений всегда, а вот автоматика для файла — только если
+файл был загружен именно с этим `conversation_id`; файл, загруженный без
+привязки к чату, работает только по явной ссылке, как и раньше.
 
 ## База данных
 
@@ -141,11 +161,13 @@ conversations                    платформенная сущность, т
 chat_messages
 ├── id                 UUID          PK, генерируется приложением (uuid4);
 │                                    у ассистентских сообщений совпадает с
-│                                    частью после "chatcmpl-" в id completion'а
+│                                    частью после "chatcmpl-"/"resp_" в id ответа
 ├── user_id            UUID          NOT NULL, индексирован — владелец записи
 ├── conversation_id    UUID          nullable, FK → conversations.id (ON DELETE CASCADE) —
-│                                    НЕ участвует в сборке контекста, только
-│                                    привязка к чату в UI-списке
+│                                    в форме Chat Completions только привязка к чату
+│                                    в UI-списке; в форме Responses ЕЩЁ И источник
+│                                    ТЕКСТОВОЙ истории для генерации (файлы — отдельно,
+│                                    см. «API — общая идея»)
 ├── role                VARCHAR(16)   "user" | "assistant"
 ├── content             TEXT
 ├── sources             JSONB         [filename], если ответ использовал файл (для отображения)
@@ -162,9 +184,14 @@ message_feedback
 ├── created_at  TIMESTAMPTZ
 └── updated_at  TIMESTAMPTZ
 
-files                             НЕЗАВИСИМЫЙ ресурс — без FK на conversations/chat_messages
+files                             только user_id обязателен; conversation_id — опционален
 ├── id                 UUID          PK, генерируется приложением (uuid4)
 ├── user_id            UUID          NOT NULL, индексирован — владелец файла
+├── conversation_id    UUID          nullable, FK → conversations.id (ON DELETE SET NULL),
+│                                    индексирован — если задан при загрузке, файл
+│                                    автоматически подключается в форме Responses
+│                                    (см. «API — общая идея»); в форме Chat Completions
+│                                    не используется вообще, только явная ссылка
 ├── filename           VARCHAR(255)
 ├── mime_type          VARCHAR(127)  nullable
 ├── size_bytes         BIGINT
@@ -179,8 +206,9 @@ files                             НЕЗАВИСИМЫЙ ресурс — без
 
 Блоб файла (`content`) не грузится при обычных запросах — колонка
 `deferred`, тянется явно только там, где реально нужны байты (передача в
-MinerU). Удаление чата каскадно удаляет его сообщения и их фидбэк; удаление
-файла — только сам файл (он ни от чего не зависит и ни на что не ссылается).
+MinerU). Удаление чата каскадно удаляет его сообщения и их фидбэк; файлы
+этого чата не удаляются — только теряют привязку (`conversation_id` → `NULL`),
+сам файл и его содержимое остаются доступны по `id`.
 
 ## Внешние сервисы
 
@@ -192,7 +220,12 @@ MINERU_API_URL=http://127.0.0.1:8010
 MINERU_BACKEND=pipeline
 MINERU_LANG=cyrillic
 MINERU_TIMEOUT_SECONDS=600
+
+HISTORY_LIMIT=10
 ```
+`HISTORY_LIMIT` — сколько последних сообщений чата подтягивать из БД в
+форме Responses при переданном `conversation_id` (см. `POST /v1/responses`
+ниже). На форму Chat Completions не влияет.
 
 ## API
 
@@ -201,12 +234,20 @@ MINERU_TIMEOUT_SECONDS=600
 
 ### `POST /v1/files`
 
-Загрузить документ. `multipart/form-data`, поле `file`. MinerU разбирает
-документ **синхронно** внутри этого вызова; таймаут — `MINERU_TIMEOUT_SECONDS`
+Загрузить документ. `multipart/form-data`, поле `file`, опционально ещё
+одно текстовое поле формы — `conversation_id`. MinerU разбирает документ
+**синхронно** внутри этого вызова; таймаут — `MINERU_TIMEOUT_SECONDS`
 (до 600 секунд по умолчанию — клиент ждёт весь разбор в одном HTTP-вызове).
+Общий ресурс для обеих форм генерации.
 
-Ответ `201` — объект в формате OpenAI Files API + нестандартные поля
-статуса разбора:
+Если передан `conversation_id` — файл привязывается к этому чату (чат
+должен принадлежать вызывающему, иначе `404`). Привязка используется
+**только** формой Responses для автоматического подключения файла к ответам
+этого чата — см. `POST /v1/responses` ниже. Без `conversation_id` файл
+остаётся независимым, подключается только явной ссылкой в любой из форм —
+как и раньше.
+
+Ответ `201` — объект в формате OpenAI Files API + нестандартные поля:
 ```json
 {
   "id": "file-85b365de-1234-4c7d-8e9f-0a1b2c3d4e5f",
@@ -216,16 +257,18 @@ MINERU_TIMEOUT_SECONDS=600
   "filename": "накладная.pdf",
   "purpose": "assistants",
   "status": "done",
-  "status_details": null
+  "status_details": null,
+  "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 }
 ```
 | Поле | Описание |
 |---|---|
-| `id` | `file-<uuid>` — используется дальше в `/v1/chat/completions` и в путях `/v1/files/{id}` |
+| `id` | `file-<uuid>` — используется в `/v1/chat/completions`, `/v1/responses` и путях `/v1/files/{id}` |
 | `bytes` | размер файла в байтах |
 | `purpose` | всегда `"assistants"` — единственное используемое значение сейчас |
 | `status` | `done` \| `failed` (платформенное расширение, не из спеки OpenAI) |
 | `status_details` | текст ошибки MinerU, если `status: "failed"`; иначе `null` |
+| `conversation_id` | платформенное расширение; `null`, если файл не привязан ни к какому чату |
 
 Если MinerU не смог разобрать документ — ответ `502`:
 ```json
@@ -233,7 +276,8 @@ MINERU_TIMEOUT_SECONDS=600
 ```
 Файл в БД при этом остаётся со `status: "failed"` и `error_message` (для
 отладки), но клиенту доступен только текст ошибки — файл с таким `id`
-дальше использовать нельзя (в контекст чата попадёт `404`/`422`, см. ниже).
+дальше использовать нельзя (в контекст чата попадёт `404`/`422` при явной
+ссылке, либо просто не будет подхвачен автоматикой — см. ниже).
 
 ---
 
@@ -244,7 +288,8 @@ MINERU_TIMEOUT_SECONDS=600
   "object": "list",
   "data": [
     {"id": "file-85b365de-...", "object": "file", "bytes": 245678, "created_at": 1735900000,
-     "filename": "накладная.pdf", "purpose": "assistants", "status": "done", "status_details": null}
+     "filename": "накладная.pdf", "purpose": "assistants", "status": "done", "status_details": null,
+     "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
   ]
 }
 ```
@@ -265,8 +310,9 @@ MINERU_TIMEOUT_SECONDS=600
 
 ### `POST /v1/chat/completions`
 
-Генерация ответа. Клиент присылает **всю** историю диалога в `messages[]` —
-сервис её не хранит и не переиспользует между запросами.
+Генерация ответа, форма Chat Completions. Клиент присылает **всю** историю
+диалога в `messages[]` — сервис её не хранит и не переиспользует между
+запросами, независимо от `conversation_id`.
 
 Тело запроса:
 ```json
@@ -290,18 +336,17 @@ MINERU_TIMEOUT_SECONDS=600
 | `model` | string | нет (по умолчанию `"document_chat"`) | не влияет на поведение, только эхом в ответе |
 | `messages` | array | да | последнее сообщение — `role: "user"`, это и есть текущий вопрос |
 | `stream` | bool | нет (по умолчанию `false`) | стримить ответ через SSE |
-| `conversation_id` | UUID string | нет | платформенное расширение — привязать сообщение к чату из `/v1/platform/conversations`. Чужой/несуществующий `conversation_id` → `404` |
+| `conversation_id` | UUID string | нет | платформенное расширение — привязать сообщение к чату из `/v1/platform/conversations`. **Только ярлык для UI** в этой форме — контекст всегда из `messages[]`. Чужой/несуществующий `conversation_id` → `404` |
 
 `content` у сообщения с `role: "user"` может быть:
 - обычной строкой — вопрос без документа;
 - массивом content-частей — `{"type": "text", "text": "..."}` (текст вопроса)
   и не более одной `{"type": "file", "file": {"file_id": "file-..."}}`
-  (ссылка на ранее загруженный документ). Файл должен принадлежать
-  вызывающему и иметь `status: "done"` — иначе `404` (файл не найден/чужой)
-  или `422` (`status` не `"done"`).
+  (ссылка на ранее загруженный документ, **вложена** под ключ `"file"`).
+  Файл должен принадлежать вызывающему и иметь `status: "done"` — иначе
+  `404` (файл не найден/чужой) или `422` (`status` не `"done"`).
 
-Ссылка на файл действует **только для этого сообщения** — см. «API — общая
-идея» выше про отсутствие памяти о документе между ходами.
+Ссылка на файл действует **только для этого сообщения**.
 
 **Нестрим-ответ** (`chat.completion`):
 ```json
@@ -333,27 +378,153 @@ data: [DONE]
 ```
 `conversation_id` в ответе — `null`, если не был передан в запросе. `id`
 (`chatcmpl-<uuid>`) — ключ для повторного чтения и фидбэка ниже. Если в
-сообщении был `file_id`, в сохранённом ответе поле `sources` = `[filename]`
-(видно в истории чата, см. `/v1/platform/conversations` ниже).
+сообщении был `file_id`, в сохранённом ответе поле `sources` = `[filename]`.
 
 ---
 
 ### `GET /v1/chat/completions/{completion_id}`
 
-Получить ранее сгенерированный ответ повторно — по `id`, который пришёл в
-`POST`-ответе (`chatcmpl-<uuid>` целиком или голый UUID). Ответ — тот же
-`chat.completion`-объект, что и у `POST` в нестрим-режиме, восстановленный
-из БД (включая `usage`).
+Получить ранее сгенерированный ответ повторно (в форме `chat.completion`) —
+по `id`, который пришёл в ответе. Работает для сообщений, сгенерированных
+**любой** из двух форм: `chatcmpl-<uuid>`, `resp_<uuid>` или голый UUID.
 
 `404`, если `id` не найден, принадлежит не вам, либо указывает на сообщение
-с `role: "user"` (в норме такой `id` клиенту никогда не отдаётся).
+с `role: "user"`.
+
+---
+
+### `POST /v1/responses`
+
+Генерация ответа, форма Responses API. Два режима в зависимости от того,
+передан ли `conversation_id` — про текстовую историю:
+
+- **Без `conversation_id`** — stateless: `input` должен содержать всё, что
+  нужно модели (аналог `messages[]`).
+- **С `conversation_id`** — `input` должен содержать **только новый ход**
+  (текст + опционально ссылку на файл). Сервис сам читает последние
+  `HISTORY_LIMIT` **текстовых** сообщений этого чата из БД и подставляет их
+  как историю. Если клиент всё равно пришлёт историю в `input` вместе с
+  `conversation_id` — `422`:
+  ```json
+  {"error": {"message": "При переданном conversation_id input должен содержать только новый ход (без истории) — история собирается агентом из БД по conversation_id", ...}}
+  ```
+
+И отдельно, независимо от текстовой истории — режим подключения файла:
+
+- **Есть `input_file` в текущем `input`** — используется он, всегда, вне
+  зависимости от того, привязан ли этот (или любой другой) файл к чату.
+  Явная ссылка — высший приоритет.
+- **Нет `input_file`, но есть `conversation_id`** — агент сам ищет
+  последний файл со `status: "done"`, загруженный в этот чат через
+  `POST /v1/files` с тем же `conversation_id`, и подставляет его без
+  участия клиента. Если такого файла нет (ничего не загружали в этот чат,
+  или загруженный файл ещё не разобрался/упал) — вопрос уходит без
+  документа, как обычный текстовый.
+- **Нет ни `input_file`, ни `conversation_id`** — как и раньше, документа в
+  контексте нет вообще.
+
+Тело запроса — файл подключён явной ссылкой:
+```json
+{
+  "model": "document_chat",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Какая сумма в накладной?"},
+        {"type": "input_file", "file_id": "file-85b365de-1234-4c7d-8e9f-0a1b2c3d4e5f"}
+      ]
+    }
+  ],
+  "stream": true,
+  "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+}
+```
+Тело запроса — файл подключён автоматически (был загружен с этим же
+`conversation_id`, `input_file` в текущем ходу не указан):
+```json
+{
+  "model": "document_chat",
+  "input": "Какая сумма в накладной?",
+  "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+}
+```
+**Важно:** формат явной ссылки на файл здесь **отличается** от формы Chat
+Completions — `file_id` лежит **плоским полем прямо в части**
+(`{"type": "input_file", "file_id": "..."}`), а не вложен под ключ `"file"`,
+как в Chat Completions (`{"type": "file", "file": {"file_id": "..."}}`).
+Это настоящий формат спеки Responses API, не опечатка и не расхождение
+между формами этого агента. `"output_text"` в частях — эхо прошлого ответа
+модели при ручном ведении истории без `conversation_id` (наравне с
+`"input_text"`).
+
+**Нестрим-ответ**:
+```json
+{
+  "id": "resp_1e6b7ee7-d5bb-4f0a-8f9e-a06f19a8f3c2",
+  "object": "response",
+  "created_at": 1735900000,
+  "status": "completed",
+  "model": "document_chat",
+  "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "output": [{
+    "id": "msg_1e6b7ee7-d5bb-4f0a-8f9e-a06f19a8f3c2",
+    "type": "message",
+    "status": "completed",
+    "role": "assistant",
+    "content": [{"type": "output_text", "text": "В накладной сумма 1000 руб.", "annotations": []}]
+  }],
+  "usage": {"input_tokens": 1204, "output_tokens": 18, "total_tokens": 1222}
+}
+```
+`usage` здесь — `input_tokens`/`output_tokens` (терминология Responses
+API), а не `prompt_tokens`/`completion_tokens`.
+
+**Стрим-ответ** — гранулярные типизированные SSE-события:
+```
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_...","status":"in_progress",...}}
+
+event: response.output_item.added
+data: {...}
+
+event: response.content_part.added
+data: {...}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_...","delta":"В"}
+
+... (ещё response.output_text.delta на каждый токен) ...
+
+event: response.output_text.done
+data: {...}
+
+event: response.content_part.done
+data: {...}
+
+event: response.output_item.done
+data: {...}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":N,"response":{"id":"resp_...","status":"completed","output":[...],"usage":{...}}}
+```
+`sequence_number` — сквозной монотонный счётчик на весь поток. Ошибка в
+процессе генерации — `event: error` с `sequence_number: 9999`.
+
+---
+
+### `GET /v1/responses/{completion_id}`
+
+То же самое, что `GET /v1/chat/completions/{completion_id}`, но возвращает
+`response`-объект. Принимает id в любом виде.
 
 ---
 
 ### `POST/GET/DELETE /v1/chat/completions/{completion_id}/feedback`
 
-Оценка ответа ассистента. `{completion_id}` — значение `id` из ответа
-(`chatcmpl-<uuid>` целиком или голый UUID — оба варианта принимаются).
+Оценка ответа ассистента — **общий путь для обеих форм генерации**,
+`{completion_id}` принимает `chatcmpl-<uuid>`, `resp_<uuid>` или голый UUID
+одинаково.
 
 Тело `POST`-запроса (все поля опциональны, повторный вызов обновляет
 существующую оценку):
@@ -384,8 +555,8 @@ data: [DONE]
 ### Чаты — `/v1/platform/conversations`
 
 Платформенное расширение для UI (список чатов, история, переименование,
-удаление). **Не входит в OpenAI-стандарт** и не участвует в генерации — см.
-«API — общая идея» выше.
+удаление). **Не входит ни в одну спеку OpenAI** и не участвует в генерации
+напрямую — см. «API — общая идея» выше.
 
 #### `POST /v1/platform/conversations`
 Создать новый чат.
@@ -407,8 +578,7 @@ data: [DONE]
 сообщения (новые первые). Формат элемента — как у `POST`.
 
 #### `GET /v1/platform/conversations/{id}/messages`
-История сообщений чата вместе с фидбэком — для восстановления `messages[]`
-на фронте при открытии чата.
+История сообщений чата вместе с фидбэком.
 ```json
 [
   {
@@ -430,11 +600,11 @@ data: [DONE]
 ]
 ```
 `id` ассистентского сообщения — тот же UUID, что использовать для
-`/v1/chat/completions/{id}/feedback` и повторного чтения. Обратите внимание:
-исходный `content` пользовательского сообщения здесь — только текстовая
-часть вопроса; сама ссылка на файл (`file_id`) в истории не хранится как
-структурная часть сообщения — она видна косвенно, через `sources` в ответе
-ассистента.
+`/v1/chat/completions/{id}/feedback` и повторного чтения в любой из форм.
+Обратите внимание: исходный `content` пользовательского сообщения здесь —
+только текстовая часть вопроса; сама ссылка на файл (`file_id`) в истории
+не хранится как структурная часть сообщения — она видна косвенно, через
+`sources` в ответе ассистента.
 
 #### `PATCH /v1/platform/conversations/{id}`
 Переименовать чат. Тело: `{ "title": "Новое название" }`.
@@ -458,14 +628,15 @@ data: [DONE]
 U=11111111-1111-1111-1111-111111111111
 BASE=http://127.0.0.1:8006
 
-# --- загрузить документ ---
+# --- загрузить документ (общий шаг для обеих форм) ---
 curl -X POST $BASE/v1/files \
   -H "X-User-Id: $U" -F "file=@накладная.pdf;type=application/pdf"
-# -> {"id": "file-85b365de-...", "status": "done", ...}
+# -> {"id": "file-85b365de-...", "status": "done", "conversation_id": null, ...}
 
 FID=file-85b365de-1234-4c7d-8e9f-0a1b2c3d4e5f
 
-# --- вопрос по документу, без привязки к чату ---
+# ============ форма Chat Completions ============
+
 curl -N -X POST $BASE/v1/chat/completions \
   -H "X-User-Id: $U" -H "Content-Type: application/json" \
   -d "{\"model\": \"document_chat\", \"stream\": true, \"messages\": [
@@ -475,53 +646,69 @@ curl -N -X POST $BASE/v1/chat/completions \
         ]}
       ]}"
 
-# --- следующий вопрос по тому же документу — file_id нужно передать снова ---
-curl -N -X POST $BASE/v1/chat/completions \
-  -H "X-User-Id: $U" -H "Content-Type: application/json" \
-  -d "{\"model\": \"document_chat\", \"messages\": [
-        {\"role\": \"user\", \"content\": [
-          {\"type\": \"text\", \"text\": \"Какая сумма в накладной?\"},
-          {\"type\": \"file\", \"file\": {\"file_id\": \"$FID\"}}
-        ]},
-        {\"role\": \"assistant\", \"content\": \"В накладной сумма 1000 руб.\"},
-        {\"role\": \"user\", \"content\": [
-          {\"type\": \"text\", \"text\": \"А дата какая?\"},
-          {\"type\": \"file\", \"file\": {\"file_id\": \"$FID\"}}
-        ]}
-      ]}"
-
-# --- вопрос без документа ---
 curl -X POST $BASE/v1/chat/completions \
   -H "X-User-Id: $U" -H "Content-Type: application/json" \
   -d '{"model": "document_chat", "messages": [{"role": "user", "content": "Что такое MinerU?"}]}'
 
-ID=chatcmpl-1e6b7ee7-d5bb-4f0a-8f9e-a06f19a8f3c2
+# ============ форма Responses — файл явной ссылкой ============
 
-# --- получить ответ повторно ---
+# без conversation_id — вопрос по документу, история целиком от клиента
+curl -N -X POST $BASE/v1/responses \
+  -H "X-User-Id: $U" -H "Content-Type: application/json" \
+  -d "{\"model\": \"document_chat\", \"stream\": true, \"input\": [
+        {\"role\": \"user\", \"content\": [
+          {\"type\": \"input_text\", \"text\": \"Какая сумма в накладной?\"},
+          {\"type\": \"input_file\", \"file_id\": \"$FID\"}
+        ]}
+      ]}"
+
+# ============ форма Responses — файл автоматически (загружен в чат) ============
+
+# создать чат
+curl -X POST $BASE/v1/platform/conversations \
+  -H "X-User-Id: $U" -H "Content-Type: application/json" -d '{"title": "Накладная"}'
+
+CID=3fa85f64-5717-4562-b3fc-2c963f66afa6
+
+# загрузить файл СРАЗУ с привязкой к чату
+curl -X POST $BASE/v1/files \
+  -H "X-User-Id: $U" -F "file=@накладная.pdf;type=application/pdf" -F "conversation_id=$CID"
+# -> {"id": "file-...", "conversation_id": "3fa85f64-...", "status": "done", ...}
+
+# первый вопрос — file_id указывать не нужно, подхватится сам
+curl -X POST $BASE/v1/responses \
+  -H "X-User-Id: $U" -H "Content-Type: application/json" \
+  -d "{\"model\": \"document_chat\", \"conversation_id\": \"$CID\", \"input\": \"Какая сумма в накладной?\"}"
+
+# следующий вопрос — снова только новый ход, документ по-прежнему подхватится сам
+curl -X POST $BASE/v1/responses \
+  -H "X-User-Id: $U" -H "Content-Type: application/json" \
+  -d "{\"model\": \"document_chat\", \"conversation_id\": \"$CID\", \"input\": \"А дата какая?\"}"
+
+# если в этом же чате нужно спросить про ДРУГОЙ файл — просто указать file_id явно,
+# явная ссылка всегда переопределяет автоматику
+FID2=file-99999999-1234-4c7d-8e9f-0a1b2c3d4e5f
+curl -X POST $BASE/v1/responses \
+  -H "X-User-Id: $U" -H "Content-Type: application/json" \
+  -d "{\"model\": \"document_chat\", \"conversation_id\": \"$CID\", \"input\": [
+        {\"role\": \"user\", \"content\": [
+          {\"type\": \"input_text\", \"text\": \"А в этом документе что?\"},
+          {\"type\": \"input_file\", \"file_id\": \"$FID2\"}
+        ]}
+      ]}"
+
+ID=resp_1e6b7ee7-d5bb-4f0a-8f9e-a06f19a8f3c2
+
+curl $BASE/v1/responses/$ID -H "X-User-Id: $U"
+
+# ============ общее для обеих форм ============
+
 curl $BASE/v1/chat/completions/$ID -H "X-User-Id: $U"
 
-# --- фидбэк ---
 curl -X POST $BASE/v1/chat/completions/$ID/feedback \
   -H "X-User-Id: $U" -H "Content-Type: application/json" -d '{"vote": 1, "comment": "точно"}'
 curl $BASE/v1/chat/completions/$ID/feedback -H "X-User-Id: $U"
 curl -X DELETE $BASE/v1/chat/completions/$ID/feedback -H "X-User-Id: $U"
-
-# --- чаты (платформенный CRUD) ---
-curl -X POST $BASE/v1/platform/conversations \
-  -H "X-User-Id: $U" -H "Content-Type: application/json" -d '{"title": "Накладная"}'
-# -> {"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", ...}
-
-CID=3fa85f64-5717-4562-b3fc-2c963f66afa6
-
-# сообщение внутри чата — conversation_id привязывает запись к нему
-curl -X POST $BASE/v1/chat/completions \
-  -H "X-User-Id: $U" -H "Content-Type: application/json" \
-  -d "{\"model\": \"document_chat\", \"conversation_id\": \"$CID\", \"messages\": [
-        {\"role\": \"user\", \"content\": [
-          {\"type\": \"text\", \"text\": \"Какая сумма в накладной?\"},
-          {\"type\": \"file\", \"file\": {\"file_id\": \"$FID\"}}
-        ]}
-      ]}"
 
 curl $BASE/v1/platform/conversations -H "X-User-Id: $U"
 curl $BASE/v1/platform/conversations/$CID/messages -H "X-User-Id: $U"
