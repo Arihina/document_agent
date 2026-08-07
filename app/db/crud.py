@@ -12,7 +12,7 @@ from app.models.models import Conversation, ChatMessage, MessageFeedback, File
 async def create_conversation(db: AsyncSession, user_id, title: Optional[str] = None) -> Conversation:
     c = Conversation(user_id=user_id, title=title)
     db.add(c)
-    
+
     await db.commit()
     await db.refresh(c)
 
@@ -64,11 +64,23 @@ async def get_conversation_messages(db: AsyncSession, conversation_id: UUID) -> 
     return result.scalars().all()
 
 
+async def get_recent_conversation_messages(
+    db: AsyncSession, conversation_id: UUID, limit: int
+) -> list[ChatMessage]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    return list(reversed(result.scalars().all()))
+
+
 async def touch_conversation(db: AsyncSession, conversation_id: UUID, title: Optional[str] = None) -> None:
     c = await db.get(Conversation, conversation_id)
     if c is None:
         return
-    
+
     c.updated_at = datetime.now(timezone.utc)
     if title is not None and c.title is None:
         c.title = title
@@ -174,9 +186,11 @@ async def create_file(
     mime_type: Optional[str],
     size_bytes: int,
     content: bytes,
+    conversation_id: Optional[UUID] = None,
 ) -> File:
     f = File(
         user_id=user_id,
+        conversation_id=conversation_id,
         filename=filename,
         mime_type=mime_type,
         size_bytes=size_bytes,
@@ -187,7 +201,7 @@ async def create_file(
 
     await db.commit()
     await db.refresh(f)
-
+    
     return f
 
 
@@ -200,7 +214,22 @@ async def get_file_for_user(db: AsyncSession, file_id: UUID, user_id) -> Optiona
     result = await db.execute(
         select(File).where(File.id == file_id, File.user_id == user_id)
     )
+    return result.scalar_one_or_none()
 
+
+async def get_latest_conversation_file(
+    db: AsyncSession, conversation_id: UUID, user_id
+) -> Optional[File]:
+    result = await db.execute(
+        select(File)
+        .where(
+            File.conversation_id == conversation_id,
+            File.user_id == user_id,
+            File.status == "done",
+        )
+        .order_by(File.created_at.desc())
+        .limit(1)
+    )
     return result.scalar_one_or_none()
 
 

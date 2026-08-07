@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     MINERU_LANG: str = "cyrillic"
     MINERU_TIMEOUT_SECONDS: int = 600
 
+    HISTORY_LIMIT: int = 10
+
     @property
     def db_url(self) -> str:
         return (

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.chat import router as chat_router
+from app.api.responses import router as responses_router
 from app.api.feedback import router as feedback_router
 from app.api.conversations import router as conversations_router
 from app.api.files import router as files_router
@@ -47,6 +48,7 @@ app.add_middleware(
 
 
 app.include_router(chat_router)
+app.include_router(responses_router)
 app.include_router(feedback_router)
 app.include_router(conversations_router)
 app.include_router(files_router)

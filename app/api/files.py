@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import time
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File as FastAPIFile, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File as FastAPIFile, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
@@ -29,15 +28,26 @@ def _fmt(f: File) -> dict:
         "purpose": "assistants",
         "status": f.status,
         "status_details": f.error_message,
+        "conversation_id": str(f.conversation_id) if f.conversation_id else None,
     }
 
 
 @router.post("", status_code=201)
 async def upload_file(
     file: UploadFile = FastAPIFile(...),
+    conversation_id: str | None = Form(None),
     user_id: UUID = Depends(get_user_id),
     db: AsyncSession = Depends(get_db),
 ):
+    conv_uuid: UUID | None = None
+    if conversation_id is not None:
+        try:
+            conv_uuid = UUID(conversation_id)
+        except ValueError:
+            raise HTTPException(422, "conversation_id должен быть UUID")
+        if await crud.get_conversation(db, conv_uuid, user_id) is None:
+            raise HTTPException(404, "Чат (conversation_id) не найден")
+
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -49,6 +59,7 @@ async def upload_file(
         mime_type=file.content_type,
         size_bytes=len(content),
         content=content,
+        conversation_id=conv_uuid,
     )
     f = await crud.set_file_processing(db, f)
 
