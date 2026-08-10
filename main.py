@@ -64,11 +64,22 @@ _ERROR_TYPES = {
 }
 
 
-def _error_body(status_code: int, message: str) -> dict:
+_VALIDATION_STATUS = 400
+
+_LOC_PREFIXES = {"body", "query", "path", "header", "cookie"}
+
+
+def _param_from_loc(loc) -> str | None:
+    """('body', 'messages', 0, 'role') -> 'messages.0.role'"""
+    parts = [str(p) for p in loc if p not in _LOC_PREFIXES]
+    return ".".join(parts) or None
+
+
+def _error_body(status_code: int, message: str, param: str | None = None) -> dict:
     return {"error": {
         "message": message,
         "type": _ERROR_TYPES.get(status_code, "server_error"),
-        "param": None,
+        "param": param,
         "code": None,
     }}
 
@@ -85,7 +96,12 @@ async def _http_exception_handler(request: Request, exc: StarletteHTTPException)
 async def _validation_exception_handler(request: Request, exc: RequestValidationError):
     first = exc.errors()[0] if exc.errors() else {}
     message = first.get("msg", "Некорректный запрос")
-    return JSONResponse(status_code=422, content=_error_body(422, message))
+    param = _param_from_loc(first.get("loc", ()))
+
+    return JSONResponse(
+        status_code=_VALIDATION_STATUS,
+        content=_error_body(_VALIDATION_STATUS, message, param),
+    )
 
 
 if __name__ == "__main__":

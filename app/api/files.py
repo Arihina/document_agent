@@ -12,24 +12,11 @@ from app.models.models import File
 from app.core import mineru
 from app.core.auth import get_user_id
 from app.api.deps import get_owned_file
+from app.api.openai_format import file_object as _fmt
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-
-
-def _fmt(f: File) -> dict:
-    return {
-        "id": f"file-{f.id}",
-        "object": "file",
-        "bytes": f.size_bytes,
-        "created_at": int(f.created_at.timestamp()),
-        "filename": f.filename,
-        "purpose": "assistants",
-        "status": f.status,
-        "status_details": f.error_message,
-        "conversation_id": str(f.conversation_id) if f.conversation_id else None,
-    }
 
 
 @router.post("", status_code=201)
@@ -44,7 +31,7 @@ async def upload_file(
         try:
             conv_uuid = UUID(conversation_id)
         except ValueError:
-            raise HTTPException(422, "conversation_id должен быть UUID")
+            raise HTTPException(400, "conversation_id должен быть UUID")
         if await crud.get_conversation(db, conv_uuid, user_id) is None:
             raise HTTPException(404, "Чат (conversation_id) не найден")
 
@@ -98,4 +85,4 @@ async def delete_file(
     db: AsyncSession = Depends(get_db),
 ):
     await crud.delete_file(db, f)
-    return {"id": file_id, "object": "file", "deleted": True}
+    return {"id": f"file-{f.id}", "object": "file", "deleted": True}

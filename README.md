@@ -74,7 +74,7 @@ JWT валидирует мастер-агент; агент доверяет в
 | `X-User-Id` не является валидным UUID | `401` |
 | Обращение к чужому completion'у/response'у, чату (`conversation`) или файлу | `404` |
 | Файл больше 25 МБ | `413` |
-| Файл ещё не обработан (`status != "done"`), а на него сослались в чате | `422` |
+| Файл ещё не обработан (`processing_status != "done"`), а на него сослались в чате | `400` |
 
 Возврат `404` (а не `403`) для чужих объектов сознателен: сервис не
 подтверждает их существование.
@@ -256,8 +256,9 @@ HISTORY_LIMIT=10
   "created_at": 1735900000,
   "filename": "накладная.pdf",
   "purpose": "assistants",
-  "status": "done",
+  "status": "processed",
   "status_details": null,
+  "processing_status": "done",
   "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 }
 ```
@@ -266,9 +267,18 @@ HISTORY_LIMIT=10
 | `id` | `file-<uuid>` — используется в `/v1/chat/completions`, `/v1/responses` и путях `/v1/files/{id}` |
 | `bytes` | размер файла в байтах |
 | `purpose` | всегда `"assistants"` — единственное используемое значение сейчас |
-| `status` | `done` \| `failed` (платформенное расширение, не из спеки OpenAI) |
-| `status_details` | текст ошибки MinerU, если `status: "failed"`; иначе `null` |
+| `status` | `uploaded` \| `processed` \| `error` — значения из спецификации OpenAI |
+| `processing_status` | платформенное расширение: внутренний статус конвейера — `pending` \| `processing` \| `done` \| `failed` |
+| `status_details` | текст ошибки MinerU, если обработка упала; иначе `null` |
 | `conversation_id` | платформенное расширение; `null`, если файл не привязан ни к какому чату |
+
+Внутренний конвейер обработки богаче, чем набор статусов OpenAI (там допустимы только `uploaded`/`processed`/`error`), поэтому в `status` уходит сведённое значение, а подробное — в `processing_status`. Схему БД это не затрагивает: сведение происходит на границе API.
+
+| `processing_status` | `status` |
+|---|---|
+| `pending`, `processing` | `uploaded` |
+| `done` | `processed` |
+| `failed` | `error` |
 
 Если MinerU не смог разобрать документ — ответ `502`:
 ```json
@@ -307,6 +317,14 @@ HISTORY_LIMIT=10
 ```
 
 ---
+
+**Параметры OpenAI, которые сервис учитывает** (обе формы): `model`, `stream`, `stream_options.include_usage`, `temperature`, `top_p`, `max_tokens` / `max_completion_tokens` (в Responses — `max_output_tokens`), `store`, `n` (только `1` — другое значение отклоняется с `400`, а не игнорируется молча). Сообщения с `role: "system"` / `"developer"` (и поле `instructions` в Responses) добавляются к промпту сервиса как дополнительные инструкции: они уточняют поведение, но не отменяют язык ответа и запрет выдумывать содержимое документа.
+
+**Не поддерживаются** (молча игнорируются): `tools`, `tool_choice`, `response_format`, `seed`, `logprobs`, `logit_bias`, `presence_penalty`, `frequency_penalty`, `stop`, `user`, `service_tier`.
+
+**Вложения принимаются только по `file_id`.** Документ сначала загружается через `POST /v1/files` (там его разбирает MinerU), и уже полученный `file-<uuid>` передаётся в `content`. Части с инлайновым вложением — `image_url` и `input_audio` в Chat Completions, `input_image` и `input_audio` в Responses, а также `file` без `file_id` — отклоняются с `400` и подсказкой загрузить файл. Молча отвечать «документ не приложен» на такой запрос нельзя: мастер маршрутизирует его сюда именно из-за вложения, и пользователь ждёт ответа по нему.
+
+**`DELETE /v1/chat/completions/{id}` и `DELETE /v1/responses/{id}`** удаляют сообщение ассистента вместе с его фидбэком (каскад по FK) и отдают `{"id": ..., "object": "chat.completion.deleted" | "response.deleted", "deleted": true}`. Реплика пользователя остаётся в чате, загруженный документ — тоже: он живёт своей жизнью в `/v1/files`.
 
 ### `POST /v1/chat/completions`
 
@@ -394,6 +412,8 @@ data: [DONE]
 ---
 
 ### `POST /v1/responses`
+
+> Поле в спецификации называется `conversation` (строка или `{"id": ...}`) — сервис принимает его, а `conversation_id` оставлен алиасом для фронта платформы. Поддерживается и стандартный `previous_response_id`: сервис находит предыдущий ответ и берёт чат, которому тот принадлежал; неизвестный или чужой id → `404`. В объекте ответа возвращается расширение `file_id` — документ, по которому агент фактически отвечал (явный из `input` или подхваченный из чата).
 
 Генерация ответа, форма Responses API. Два режима в зависимости от того,
 передан ли `conversation_id` — про текстовую историю:
@@ -618,6 +638,8 @@ data: {"type":"response.completed","sequence_number":N,"response":{"id":"resp_..
 ```json
 {"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": null}}
 ```
+Невалидное тело запроса — **`400`**, а не `422`: OpenAI отвечает на такие запросы именно `400`, а SDK мапит `422` в `UnprocessableEntityError`, мимо клиентского `except BadRequestError`. Поле `param` заполняется путём до проблемного поля (`messages.0.role`), а не остаётся `null`.
+
 `type` — грубая классификация по HTTP-статусу: `400/413/415/422` →
 `invalid_request_error`, `401` → `authentication_error`, `404` →
 `not_found_error`, остальное → `server_error`.
