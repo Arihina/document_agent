@@ -16,7 +16,15 @@ class Settings(BaseSettings):
     MINERU_LANG: str = "cyrillic"
     MINERU_TIMEOUT_SECONDS: int = 600
 
-    HISTORY_LIMIT: int = 10
+    CONTEXT_WINDOW: int = 4096
+    RESERVE_OUTPUT_TOKENS: int = 512
+    CONTEXT_SAFETY_TOKENS: int = 96
+    HISTORY_MIN_TOKENS: int = 384
+    HISTORY_MAX_MESSAGES: int = 200
+    TOKENIZER_REPO: str | None = None
+
+    MAX_ATTACHED_FILES: int = 1
+    DOCUMENT_OVERFLOW: str = "truncate"
 
     @property
     def db_url(self) -> str:
