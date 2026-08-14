@@ -6,12 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.concurrency import run_in_threadpool
 
 from app.api.chat import router as chat_router
 from app.api.responses import router as responses_router
 from app.api.feedback import router as feedback_router
 from app.api.conversations import router as conversations_router
 from app.api.files import router as files_router
+from app.api.generation import get_counter
 from app.core import mineru
 from app.core.config import settings
 
@@ -26,12 +28,16 @@ async def lifespan(app: FastAPI):
             "обработка документов будет падать (502), пока MinerU не появится.",
             settings.MINERU_API_URL,
         )
+
+    counter = await run_in_threadpool(get_counter)
+    logger.info("счётчик токенов: %s", counter.name)
+
     yield
 
 
 app = FastAPI(
     title="Document OCR+LLM Agent API",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
