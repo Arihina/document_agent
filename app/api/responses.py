@@ -15,13 +15,13 @@ from app.core.llm import stream_answer
 from app.core.auth import get_user_id
 from app.core.config import settings
 from app.api.deps import get_owned_completion, parse_completion_id, parse_file_id
-from app.api.generation import collect, persist, resolve_file
+from app.api.generation import build, collect, persist, resolve_files
 from app.api.openai_format import (
     message_item, response_object, responses_usage, sse_event, text_part,
 )
 from app.api.openai_request import (
-    DIALOG_ROLES, collect_instructions, parse_responses_content,
-    reject_inline_attachment, sampling_options,
+    DIALOG_ROLES, collect_file_ids, collect_instructions,
+    parse_responses_content, reject_inline_attachment, sampling_options,
 )
 
 router = APIRouter(prefix="/v1/responses", tags=["responses"])
@@ -59,6 +59,7 @@ def _extract(body: dict) -> dict:
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
             max_tokens=body.get("max_output_tokens"),
+            num_ctx=settings.CONTEXT_WINDOW,
         ),
     }
 
@@ -69,7 +70,7 @@ def _extract(body: dict) -> dict:
         question = input_data.strip()
         if not question:
             raise HTTPException(400, "Пустой input")
-        return {**common, "history": [], "question": question, "file_id_raw": None}
+        return {**common, "history": [], "question": question, "file_ids_raw": []}
 
     if not isinstance(input_data, list) or not input_data:
         raise HTTPException(
@@ -99,7 +100,7 @@ def _extract(body: dict) -> dict:
     ]
 
     return {**common, "history": history, "question": parsed.text,
-            "file_id_raw": parsed.file_id}
+            "file_ids_raw": collect_file_ids(input_data, parse_responses_content)}
 
 
 async def _resolve_conversation(db, user_id, req) -> UUID | None:
@@ -148,22 +149,22 @@ async def create_response(
         history = [
             (m.role, m.content)
             for m in await crud.get_recent_conversation_messages(
-                db, conversation_id, settings.HISTORY_LIMIT)
+                db, conversation_id, settings.HISTORY_MAX_MESSAGES)
         ]
 
-    if req["file_id_raw"] is not None:
-        document_markdown, active_filename, active_file_id = await resolve_file(
-            db, user_id, parse_file_id(req["file_id_raw"]))
-    elif conversation_id is not None:
-        auto = await crud.get_latest_conversation_file(db, conversation_id, user_id)
-        document_markdown = auto.markdown_content if auto else None
-        active_filename = auto.filename if auto else None
-        active_file_id = auto.id if auto else None
-    else:
-        document_markdown = active_filename = active_file_id = None
+    file_uuids = [parse_file_id(x) for x in req["file_ids_raw"]]
+    if not file_uuids and conversation_id is not None:
+        auto = await crud.get_latest_conversation_file(
+            db, conversation_id, user_id)
+        if auto is not None:
+            file_uuids = [auto.id]
 
-    sources = [active_filename] if active_filename else None
-    file_id_out = f"file-{active_file_id}" if active_file_id else None
+    documents = await resolve_files(db, user_id, file_uuids)
+
+    built = build(req["question"], documents, history,
+                  req["instructions"], req["max_output_tokens"])
+    sources = built.sources
+    file_id_out = f"file-{file_uuids[0]}" if file_uuids else None
 
     assistant_id = uuid4()
     response_id = f"resp_{assistant_id}"
@@ -172,10 +173,7 @@ async def create_response(
     conversation_id_str = str(conversation_id) if conversation_id else None
 
     if not req["stream"]:
-        gen = await run_in_threadpool(
-            collect, req["question"], document_markdown, history,
-            req["instructions"], req["options"],
-        )
+        gen = await run_in_threadpool(collect, built.prompt, req["options"])
 
         if req["store"]:
             await persist(user_id, req["question"], gen.answer, sources, model,
@@ -219,10 +217,7 @@ async def create_response(
             part=text_part(""),
         )
 
-        for token, usage in stream_answer(
-            req["question"], document_markdown, history,
-            instructions=req["instructions"], options=req["options"],
-        ):
+        for token, usage in stream_answer(built.prompt, req["options"]):
             if token:
                 state["answer"] += token
                 yield sse_event(

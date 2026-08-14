@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException
 
@@ -12,7 +12,7 @@ DIALOG_ROLES = ("user", "assistant")
 @dataclass
 class ParsedContent:
     text: str
-    file_id: str | None = None
+    file_ids: list[str] = field(default_factory=list)
     inline_attachment: str | None = None
 
 
@@ -24,7 +24,7 @@ def parse_chat_content(content) -> ParsedContent:
         return ParsedContent(text="")
 
     texts: list[str] = []
-    file_id: str | None = None
+    file_ids: list[str] = []
     inline: str | None = None
 
     for part in content:
@@ -36,13 +36,13 @@ def parse_chat_content(content) -> ParsedContent:
         elif ptype == "file":
             file_ref = part.get("file") or {}
             if file_ref.get("file_id"):
-                file_id = file_ref["file_id"]
+                file_ids.append(file_ref["file_id"])
             else:
                 inline = inline or "file"
         elif ptype in ("image_url", "input_audio"):
             inline = inline or ptype
 
-    return ParsedContent("\n".join(texts).strip(), file_id, inline)
+    return ParsedContent("\n".join(texts).strip(), _dedupe(file_ids), inline)
 
 
 def parse_responses_content(content) -> ParsedContent:
@@ -53,7 +53,7 @@ def parse_responses_content(content) -> ParsedContent:
         return ParsedContent(text="")
 
     texts: list[str] = []
-    file_id: str | None = None
+    file_ids: list[str] = []
     inline: str | None = None
 
     for part in content:
@@ -64,13 +64,43 @@ def parse_responses_content(content) -> ParsedContent:
             texts.append(str(part.get("text", "")))
         elif ptype == "input_file":
             if part.get("file_id"):
-                file_id = part["file_id"]
+                file_ids.append(part["file_id"])
             else:
                 inline = inline or "input_file"
         elif ptype in ("input_image", "input_audio"):
             inline = inline or ptype
 
-    return ParsedContent("\n".join(texts).strip(), file_id, inline)
+    return ParsedContent("\n".join(texts).strip(), _dedupe(file_ids), inline)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for i in items:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def collect_file_ids(items: list, parse) -> list[str]:
+    """Sticky файл: рабочий набор задаёт последнее сообщение с вложениями.
+
+    Накопления по всей истории нет — иначе набор растёт бесконечно и упирается
+    в MAX_ATTACHED_FILES на ровном месте. Приложил новый файл — набор сменился.
+    """
+    for m in reversed(items):
+        if not isinstance(m, dict):
+            continue
+        if m.get("type", "message") != "message":
+            continue
+        if m.get("role") not in DIALOG_ROLES:
+            continue
+        parsed = parse(m.get("content"))
+        if parsed.file_ids:
+            return parsed.file_ids
+
+    return []
 
 
 def reject_inline_attachment(parsed: ParsedContent) -> None:
@@ -95,8 +125,13 @@ def collect_instructions(items: list, parse) -> str | None:
     return joined or None
 
 
-def sampling_options(temperature=None, top_p=None, max_tokens=None) -> dict | None:
+def sampling_options(
+    temperature=None, top_p=None, max_tokens=None, num_ctx=None,
+) -> dict:
     options: dict = {}
+
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
 
     if temperature is not None:
         options["temperature"] = _number("temperature", temperature)
@@ -108,7 +143,7 @@ def sampling_options(temperature=None, top_p=None, max_tokens=None) -> dict | No
                 400, "Ограничение на длину ответа должно быть целым числом >= 1")
         options["num_predict"] = max_tokens
 
-    return options or None
+    return options
 
 
 def _number(name: str, value) -> float:

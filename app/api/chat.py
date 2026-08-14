@@ -14,12 +14,13 @@ from app.db import crud
 from app.core.llm import stream_answer
 from app.core.auth import get_user_id
 from app.api.deps import get_owned_completion, parse_file_id
-from app.api.generation import collect, persist, resolve_file
+from app.api.generation import build, collect, persist, resolve_files
 from app.api.openai_format import chat_usage, chunk, completion_object
 from app.api.openai_request import (
-    DIALOG_ROLES, collect_instructions, parse_chat_content,
+    DIALOG_ROLES, collect_file_ids, collect_instructions, parse_chat_content,
     reject_inline_attachment, sampling_options,
 )
+from app.core.config import settings
 
 router = APIRouter(prefix="/v1/chat/completions", tags=["chat"])
 
@@ -58,11 +59,14 @@ def _extract(body: dict) -> dict:
     if not isinstance(stream_options, dict):
         raise HTTPException(400, "stream_options должен быть объектом")
 
+    max_tokens = body.get("max_completion_tokens", body.get("max_tokens"))
+
     return {
         "model": model,
         "history": history,
         "question": parsed.text,
-        "file_id_raw": parsed.file_id,
+        "file_ids_raw": collect_file_ids(messages, parse_chat_content),
+        "max_tokens": max_tokens,
         "instructions": collect_instructions(messages, parse_chat_content),
         "stream": bool(body.get("stream", False)),
         "include_usage": bool(stream_options.get("include_usage", False)),
@@ -71,8 +75,8 @@ def _extract(body: dict) -> dict:
         "options": sampling_options(
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
-            max_tokens=body.get("max_completion_tokens",
-                                body.get("max_tokens")),
+            max_tokens=max_tokens,
+            num_ctx=settings.CONTEXT_WINDOW,
         ),
     }
 
@@ -95,10 +99,18 @@ async def chat_completions(
         if await crud.get_conversation(db, conversation_id, user_id) is None:
             raise HTTPException(404, "Чат (conversation_id) не найден")
 
-    file_uuid = parse_file_id(
-        req["file_id_raw"]) if req["file_id_raw"] else None
-    document_markdown, active_filename, _ = await resolve_file(db, user_id, file_uuid)
-    sources = [active_filename] if active_filename else None
+    file_uuids = [parse_file_id(x) for x in req["file_ids_raw"]]
+    if not file_uuids and conversation_id is not None:
+        auto = await crud.get_latest_conversation_file(
+            db, conversation_id, user_id)
+        if auto is not None:
+            file_uuids = [auto.id]
+
+    documents = await resolve_files(db, user_id, file_uuids)
+
+    built = build(req["question"], documents, req["history"],
+                  req["instructions"], req["max_tokens"])
+    sources = built.sources
 
     assistant_id = uuid4()
     completion_id = f"chatcmpl-{assistant_id}"
@@ -106,10 +118,7 @@ async def chat_completions(
     conversation_id_str = str(conversation_id) if conversation_id else None
 
     if not req["stream"]:
-        gen = await run_in_threadpool(
-            collect, req["question"], document_markdown, req["history"],
-            req["instructions"], req["options"],
-        )
+        gen = await run_in_threadpool(collect, built.prompt, req["options"])
 
         if req["store"]:
             await persist(user_id, req["question"], gen.answer, sources, model,
@@ -125,10 +134,7 @@ async def chat_completions(
         yield chunk(completion_id, created, model, conversation_id_str,
                     {"role": "assistant", "content": ""})
 
-        for token, usage in stream_answer(
-            req["question"], document_markdown, req["history"],
-            instructions=req["instructions"], options=req["options"],
-        ):
+        for token, usage in stream_answer(built.prompt, req["options"]):
             if token:
                 state["answer"] += token
                 yield chunk(completion_id, created, model,

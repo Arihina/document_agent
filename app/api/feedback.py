@@ -34,7 +34,10 @@ async def set_feedback(
     comment: Optional[str] = body.get("comment", _MISSING)
 
     if raw_vote is not _MISSING and raw_vote not in (1, -1, None):
-        raise HTTPException(422, "vote должен быть 1, -1 или null")
+        raise HTTPException(400, "vote должен быть 1, -1 или null")
+
+    if comment is not _MISSING and comment is not None and not isinstance(comment, str):
+        raise HTTPException(400, "comment должен быть строкой или null")
 
     if msg.role != "assistant":
         raise HTTPException(400, "Оценивать можно только ответы ассистента")

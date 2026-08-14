@@ -12,6 +12,7 @@ from app.models.models import File
 from app.core import mineru
 from app.core.auth import get_user_id
 from app.api.deps import get_owned_file
+from app.api.generation import get_counter
 from app.api.openai_format import file_object as _fmt
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
@@ -61,6 +62,7 @@ async def upload_file(
     f = await crud.set_file_done(
         db, f, markdown_content=markdown,
         ocr_backend=f"mineru:{mineru.settings.MINERU_BACKEND}:{mineru.settings.MINERU_LANG}",
+        markdown_tokens=get_counter().count(markdown),
     )
     return _fmt(f)
 
