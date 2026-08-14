@@ -62,6 +62,7 @@ class ChatMessage(Base):
         Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True)
+    tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -132,6 +133,9 @@ class File(Base):
         String(16), nullable=False, default="pending")
     markdown_content: Mapped[Optional[str]
                              ] = mapped_column(Text, nullable=True)
+    
+    markdown_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True)
     ocr_backend: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
