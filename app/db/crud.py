@@ -99,6 +99,7 @@ async def add_message(
     completion_tokens: Optional[int] = None,
     id: Optional[UUID] = None,
     conversation_id: Optional[UUID] = None,
+    tokens: Optional[int] = None,
 ) -> ChatMessage:
     msg = ChatMessage(
         id=id or uuid4(),
@@ -110,6 +111,7 @@ async def add_message(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        tokens=tokens,
     )
     db.add(msg)
 
@@ -201,7 +203,7 @@ async def create_file(
 
     await db.commit()
     await db.refresh(f)
-    
+
     return f
 
 
@@ -265,11 +267,24 @@ async def set_file_processing(db: AsyncSession, f: File) -> File:
     return f
 
 
-async def set_file_done(db: AsyncSession, f: File, markdown_content: str, ocr_backend: str) -> File:
+async def set_file_done(
+    db: AsyncSession, f: File, markdown_content: str, ocr_backend: str,
+    markdown_tokens: Optional[int] = None,
+) -> File:
     f.status = "done"
     f.markdown_content = markdown_content
+    f.markdown_tokens = markdown_tokens
     f.ocr_backend = ocr_backend
     f.error_message = None
+
+    await db.commit()
+    await db.refresh(f)
+
+    return f
+
+
+async def set_file_tokens(db: AsyncSession, f: File, tokens: int) -> File:
+    f.markdown_tokens = tokens
 
     await db.commit()
     await db.refresh(f)
@@ -285,3 +300,8 @@ async def set_file_failed(db: AsyncSession, f: File, error_message: str) -> File
     await db.refresh(f)
 
     return f
+
+
+async def delete_message(db: AsyncSession, msg: ChatMessage) -> None:
+    await db.delete(msg)
+    await db.commit()
