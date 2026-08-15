@@ -16,9 +16,33 @@ services:
       context: ./mineru
       args:
         MINERU_MODEL_SOURCE: huggingface
+        # CPU-сборка (локальная разработка без карты):
+        # TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
     restart: unless-stopped
     ports:
       - "8010:8010"
+    environment:
+      # cuda | cpu — без явного значения MinerU определяет устройство сам
+      # через torch.cuda.is_available(); указываем явно, чтобы тихий откат
+      # на CPU при проблемах с драйвером был виден как ошибка, а не как
+      # десятикратное замедление разбора.
+      MINERU_DEVICE_MODE: cuda
+      # Сколько ГБ видеопамяти MinerU считает своими. От этого зависит
+      # размер батча. На проде обязательно: карта делится с Ollama, а без
+      # лимита MinerU видит все 80 ГБ A100 и берёт батч под них.
+      MINERU_VIRTUAL_VRAM_SIZE: "16"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    # Требует nvidia-container-toolkit на хосте. Для запуска без карты
+    # закомментировать блок deploy и выставить MINERU_DEVICE_MODE: cpu.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   postgres_data:

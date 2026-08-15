@@ -1,9 +1,11 @@
 # Официальный образ MinerU (docker/global/Dockerfile) собран на базе
-# vllm/vllm-openai — это оправдано для vlm/hybrid-бэкендов с GPU-инференсом,
-# но лишнее для нашего случая: на этапе 1 подтверждён "pipeline"-бэкенд
-# (CPU-совместимый, кириллица через явную recognition-модель). Поэтому
-# берём обычный python-образ, без vllm и CUDA — быстрее собирается, легче
-# по месту, не тянет лишние зависимости.
+# vllm/vllm-openai — это оправдано для vlm/hybrid-бэкендов, но лишнее для
+# нашего случая: подтверждён "pipeline"-бэкенд (кириллица через явную
+# recognition-модель). Он тянет torch + torchvision + onnxruntime и НЕ тянет
+# paddle, поэтому GPU здесь — это обычный CUDA-torch, а не отдельная
+# paddlepaddle-gpu сборка. Берём обычный python-образ: CUDA-рантайм приезжает
+# вместе с колёсами torch (nvidia-*), драйвер пробрасывается с хоста через
+# nvidia-container-toolkit. Свой CUDA-базовый образ не нужен.
 
 FROM python:3.12-slim-bookworm
 
@@ -14,8 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Вариант torch задаётся явно, а не отдаётся на откуп дефолту PyPI:
+#   CUDA 12.4 : https://download.pytorch.org/whl/cu124   (по умолчанию)
+#   CUDA 12.8 : https://download.pytorch.org/whl/cu128
+#   только CPU: https://download.pytorch.org/whl/cpu     (образ ~3 ГБ легче)
+# Версия должна быть не новее CUDA-драйвера на хосте (`nvidia-smi`).
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir "mineru[core,pipeline]"
+    && pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX_URL}
+
+# torch уже стоит нужного варианта — mineru его не переустановит.
+RUN pip install --no-cache-dir "mineru[core,pipeline]"
 
 # huggingface по умолчанию; если сервер не видит HF (та же история, что
 # была с Baidu-registry для другого агента) — пересобрать с
