@@ -27,7 +27,12 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir torch torchvision --index-url ${TORCH_INDEX_URL}
 
 # torch уже стоит нужного варианта — mineru его не переустановит.
-RUN pip install --no-cache-dir "mineru[core,pipeline]"
+# Версия закреплена жёстко: начиная с 4.0 у MinerU другой API (только /v1,
+# без /file_parse) и другой CLI моделей (без -m/-s), а extras core/pipeline
+# в 4.x вообще отсутствуют — pip на них лишь предупреждает и ставит 4.x,
+# после чего агент получает 404 на каждый документ. 2.7.6 — последняя 2.x,
+# с которой проект и писался.
+RUN pip install --no-cache-dir "mineru[core,pipeline]==2.7.6"
 
 # huggingface по умолчанию; если сервер не видит HF (та же история, что
 # была с Baidu-registry для другого агента) — пересобрать с
@@ -45,7 +50,10 @@ ENV MINERU_MODEL_SOURCE=local
 
 EXPOSE 8010
 
+# /health у MinerU 2.x нет — единственный маршрут POST /file_parse, поэтому
+# проверяем /openapi.json (его FastAPI отдаёт всегда). Иначе контейнер
+# навсегда остаётся unhealthy при полностью рабочем сервисе.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
-    CMD curl -f http://localhost:8010/health || exit 1
+    CMD curl -f http://localhost:8010/openapi.json || exit 1
 
 CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8010"]

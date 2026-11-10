@@ -20,8 +20,11 @@ services:
         # TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
     restart: unless-stopped
+    # Только loopback: у MinerU API нет аутентификации, наружу его отдавать
+    # нельзя. Приложению на том же хосте 127.0.0.1:8010 доступен; из соседнего
+    # контейнера — уже нет, тогда ходить по имени сервиса mineru:8010.
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
     environment:
       # cuda | cpu — без явного значения MinerU определяет устройство сам
       # через torch.cuda.is_available(); указываем явно, чтобы тихий откат

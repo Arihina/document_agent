@@ -14,7 +14,7 @@ class MinerUError(Exception):
 async def is_available() -> bool:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{settings.MINERU_API_URL}/health")
+            resp = await client.get(f"{settings.MINERU_API_URL}/openapi.json")
         return resp.status_code == 200
     except httpx.RequestError:
         return False
