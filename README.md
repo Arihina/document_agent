@@ -265,6 +265,46 @@ MINERU_LANG=cyrillic
 MINERU_TIMEOUT_SECONDS=600
 ```
 
+## Аутентификация запросов от master
+
+Агент доверяет только master-ноде и не видит JWT Keycloak. Master валидирует
+пользователя и роли, а агенту передаёт проверенные заголовки:
+
+| Заголовок | Кто ставит | Смысл |
+|---|---|---|
+| `X-Internal-Token` | master | per-agent секрет; доказывает, что запрос от master |
+| `X-User-Id` | master | UUID пользователя из проверенного `sub` |
+| `X-Request-Id` | nginx/клиент или master | корреляция логов, не аутентификация |
+
+Проверка — в `app/core/internal_auth.py` (чистый ASGI-middleware, закрывает
+все ручки по умолчанию). Публичный только liveness `GET /health` (точное
+совпадение пути). `user_id` бизнес-код берёт из `request.state` через единую
+dependency `app.core.auth.get_user_id`, а не из заголовка напрямую.
+
+```env
+# off | token | assertion. token — штатный режим (этап 1); assertion — этап 2
+# (в этом агенте пока не реализован, старт с ним завершится ошибкой).
+INTERNAL_AUTH_MODE=token
+# Секрет агента document_chat из master node: AGENT_INTERNAL_TOKENS["document_chat"].
+MASTER_INTERNAL_TOKEN=<длинный случайный секрет>
+PUBLIC_PATHS=/health
+AGENT_ID=document_chat
+ENV=dev
+```
+
+Правила:
+
+- `INTERNAL_AUTH_MODE=token` + пустой/короткий `MASTER_INTERNAL_TOKEN` →
+  агент **не стартует** (fail-closed);
+- `off` — только локальная разработка/тесты, при `ENV=prod` запрещён и
+  логирует предупреждение;
+- секрет — только в env/secret-файле, не в git, не в `agents.yaml`, не в
+  логах и не в ответах API;
+- при `ENV=prod` `/docs`, `/redoc`, `/openapi.json` отключены;
+- на хосте агент слушает `127.0.0.1:8007`; наружу порт не публикуется.
+
+Полная инструкция — `master_node/docs/agent-side-changes.md`.
+
 ## Контекстное окно
 
 Промпт собирается под фактический размер контекста модели, а не «последние
