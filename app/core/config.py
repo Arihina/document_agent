@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +27,30 @@ class Settings(BaseSettings):
 
     MAX_ATTACHED_FILES: int = 1
     DOCUMENT_OVERFLOW: str = "truncate"
+
+    # --- Внутренняя аутентификация master -> агент ---
+    # off | token | assertion. token (проверка X-Internal-Token);
+    # assertion в этом агенте пока не реализован (старт с ним
+    # завершится ошибкой — fail-closed).
+    INTERNAL_AUTH_MODE: Literal["off", "token", "assertion"] = "token"
+    # Собственный секрет агента. Выдаёт master в AGENT_INTERNAL_TOKENS под
+    # ключом "document_chat". Только env/secret-файл.
+    MASTER_INTERNAL_TOKEN: str | None = None
+    # Пути без внутренней аутентификации. Только liveness, без данных.
+    # Список через запятую; сравнение — точное, НЕ startswith.
+    PUBLIC_PATHS: str = "/health"
+    # Идентификатор агента: для aud в assertion и для логов.
+    AGENT_ID: str = "document_chat"
+    # dev | prod. В prod запрещены off и открытая документация (/docs, /openapi).
+    ENV: Literal["dev", "prod"] = "dev"
+    # (не используется, пока INTERNAL_AUTH_MODE != assertion).
+    MASTER_ASSERTION_PUBLIC_KEY: str | None = None
+
+    @property
+    def public_paths(self) -> tuple[str, ...]:
+        return tuple(
+            p.strip() for p in self.PUBLIC_PATHS.split(",") if p.strip()
+        )
 
     @property
     def db_url(self) -> str:

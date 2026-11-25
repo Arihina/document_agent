@@ -16,12 +16,17 @@ from app.api.files import router as files_router
 from app.api.generation import get_counter
 from app.core import mineru
 from app.core.config import settings
+from app.core.internal_auth import install_internal_auth, validate_startup
 
 logger = logging.getLogger("document_agent")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail-closed: при token-режиме без токена, assertion или off+prod агент
+    # не стартует (RuntimeError до приёма запросов).
+    validate_startup(settings)
+
     if not await mineru.is_available():
         logger.warning(
             "MinerU недоступен по %s на старте — сервис поднимется, но "
@@ -35,14 +40,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
+prod = settings.ENV == "prod"
+
 app = FastAPI(
     title="Document OCR+LLM Agent API",
     version="2.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None if prod else "/docs",
+    redoc_url=None if prod else "/redoc",
+    openapi_url=None if prod else "/openapi.json",
     lifespan=lifespan,
 )
 
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+install_internal_auth(app, settings)
 
 app.add_middleware(
     CORSMiddleware,
